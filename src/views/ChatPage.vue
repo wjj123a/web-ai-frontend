@@ -3,32 +3,43 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterLink, useRouter } from "vue-router";
 
 import ChatConversationPanel from "../components/chat/ChatConversationPanel.vue";
-import ChatHistoryPanel from "../components/chat/ChatHistoryPanel.vue";
+import ConversationHistoryPanel from "../components/chat/ConversationHistoryPanel.vue";
 import KnowledgePanel from "../components/chat/KnowledgePanel.vue";
 import {
   createConversation,
+  deleteConversation,
   getConversationMessages,
   listConversations,
   streamConversationReply,
 } from "../services/chat";
 import {
   buildConversationTitle,
-  loadKnowledgeDocuments,
-  saveKnowledgeDocuments,
 } from "../services/chatStorage";
+import {
+  analyzeTemporaryDocument,
+  deleteKnowledgeDocument,
+  listKnowledgeDocuments,
+  uploadKnowledgeDocument,
+} from "../services/knowledge";
 import { clearSession, useSession } from "../services/session";
 
 const router = useRouter();
 const session = useSession();
 
 const conversations = ref([]);
-const documents = ref(loadKnowledgeDocuments());
+const documents = ref([]);
 const activeConversationId = ref(null);
 const draftMessage = ref("");
 const errorMessage = ref("");
+const knowledgeErrorMessage = ref("");
+const selectedTemporaryFile = ref(null);
 const isStreaming = ref(false);
 const isLoadingConversations = ref(false);
 const isLoadingConversation = ref(false);
+const isLoadingDocuments = ref(false);
+const isUploadingDocuments = ref(false);
+const isAnalyzingTemporaryDocument = ref(false);
+const deletingConversationId = ref(null);
 
 let streamController = null;
 
@@ -38,6 +49,14 @@ const isLoggedIn = computed(() => {
 
 const activeConversation = computed(() => {
   return conversations.value.find((item) => item.id === activeConversationId.value) ?? null;
+});
+
+const isSubmittingConversation = computed(() => {
+  return isStreaming.value || isAnalyzingTemporaryDocument.value;
+});
+
+const selectedTemporaryFileName = computed(() => {
+  return selectedTemporaryFile.value?.name || "";
 });
 
 function createClientId() {
@@ -110,17 +129,21 @@ function setConversationMessages(conversationId, messages) {
 
 function mergeServerConversations(nextConversations) {
   const existingMap = new Map(conversations.value.map((item) => [item.id, item]));
+  const localOnlyConversations = conversations.value.filter((item) => item.isLocalOnly);
 
   conversations.value = sortConversations(
-    nextConversations.map((conversation) => {
-      const existing = existingMap.get(conversation.id);
-      return {
-        ...conversation,
-        messages: existing?.messages ?? [],
-        messagesLoaded: existing?.messagesLoaded ?? false,
-        preview: existing?.preview ?? "",
-      };
-    }),
+    [
+      ...nextConversations.map((conversation) => {
+        const existing = existingMap.get(conversation.id);
+        return {
+          ...conversation,
+          messages: existing?.messages ?? [],
+          messagesLoaded: existing?.messagesLoaded ?? false,
+          preview: existing?.preview ?? "",
+        };
+      }),
+      ...localOnlyConversations,
+    ],
   );
 }
 
@@ -149,7 +172,7 @@ async function loadMessagesForConversation(conversationId) {
   }
 
   const targetConversation = getConversationById(conversationId);
-  if (!targetConversation) {
+  if (!targetConversation || targetConversation.isLocalOnly) {
     return;
   }
 
@@ -166,32 +189,64 @@ async function loadMessagesForConversation(conversationId) {
   }
 }
 
-function persistDocuments(nextDocuments) {
-  documents.value = nextDocuments;
-  saveKnowledgeDocuments(documents.value);
-}
-
-function getFileTypeLabel(file) {
-  const extension = file.name.split(".").pop()?.toUpperCase();
-  return extension || "文件";
-}
-
-function handleUploadFiles(files) {
-  const nextDocuments = files.map((file) => {
-    return {
-      id: createClientId(),
-      name: file.name,
-      size: file.size,
-      typeLabel: getFileTypeLabel(file),
-      uploadedAt: new Date().toISOString(),
-    };
+function sortDocuments(items) {
+  return [...items].sort((left, right) => {
+    return new Date(right.uploadedAt).getTime() - new Date(left.uploadedAt).getTime();
   });
-
-  persistDocuments([...nextDocuments, ...documents.value]);
 }
 
-function handleRemoveDocument(documentId) {
-  persistDocuments(documents.value.filter((item) => item.id !== documentId));
+async function loadDocuments() {
+  isLoadingDocuments.value = true;
+
+  try {
+    const nextDocuments = await listKnowledgeDocuments({
+      token: session.accessToken,
+    });
+    documents.value = sortDocuments(nextDocuments);
+  } finally {
+    isLoadingDocuments.value = false;
+  }
+}
+
+async function handleUploadFiles(files) {
+  if (!files.length || isUploadingDocuments.value) {
+    return;
+  }
+
+  knowledgeErrorMessage.value = "";
+  isUploadingDocuments.value = true;
+
+  try {
+    const uploadedDocuments = [];
+
+    for (const file of files) {
+      const document = await uploadKnowledgeDocument({
+        file,
+        token: session.accessToken,
+      });
+      uploadedDocuments.push(document);
+    }
+
+    documents.value = sortDocuments([...uploadedDocuments, ...documents.value]);
+  } catch (error) {
+    knowledgeErrorMessage.value = resolveErrorMessage(error, "上传文档失败，请稍后重试");
+  } finally {
+    isUploadingDocuments.value = false;
+  }
+}
+
+async function handleRemoveDocument(documentId) {
+  knowledgeErrorMessage.value = "";
+
+  try {
+    await deleteKnowledgeDocument({
+      documentId,
+      token: session.accessToken,
+    });
+    documents.value = documents.value.filter((item) => item.id !== documentId);
+  } catch (error) {
+    knowledgeErrorMessage.value = resolveErrorMessage(error, "删除文档失败，请稍后重试");
+  }
 }
 
 function stopStreaming() {
@@ -201,6 +256,34 @@ function stopStreaming() {
   }
 
   isStreaming.value = false;
+}
+
+function createLocalConversation(title) {
+  const now = new Date().toISOString();
+
+  return {
+    id: createClientId(),
+    title,
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    messagesLoaded: true,
+    preview: "",
+    isLocalOnly: true,
+  };
+}
+
+async function ensureConversationForTemporaryAnalysis(message, fileName) {
+  const currentConversation = activeConversation.value;
+
+  if (currentConversation) {
+    return currentConversation;
+  }
+
+  const nextConversation = createLocalConversation(`临时分析 · ${fileName || buildConversationTitle(message)}`);
+  updateConversation(nextConversation);
+  activeConversationId.value = nextConversation.id;
+  return nextConversation;
 }
 
 function appendAssistantText(conversationId, messageId, nextText) {
@@ -277,10 +360,19 @@ function resolveErrorMessage(error, fallbackMessage) {
   return message;
 }
 
+function handleTemporaryFileSelect(file) {
+  errorMessage.value = "";
+  selectedTemporaryFile.value = file;
+}
+
+function clearTemporaryFile() {
+  selectedTemporaryFile.value = null;
+}
+
 async function handleSelectConversation(conversationId) {
   const targetConversation = getConversationById(conversationId);
 
-  if (isStreaming.value) {
+  if (isSubmittingConversation.value) {
     return;
   }
 
@@ -291,6 +383,10 @@ async function handleSelectConversation(conversationId) {
   activeConversationId.value = conversationId;
   errorMessage.value = "";
 
+  if (targetConversation?.isLocalOnly) {
+    return;
+  }
+
   try {
     await loadMessagesForConversation(conversationId);
   } catch (error) {
@@ -298,14 +394,123 @@ async function handleSelectConversation(conversationId) {
   }
 }
 
+async function handleDeleteConversation(conversationId) {
+  if (isSubmittingConversation.value || deletingConversationId.value) {
+    return;
+  }
+
+  const targetConversation = getConversationById(conversationId);
+
+  if (!targetConversation) {
+    return;
+  }
+
+  deletingConversationId.value = conversationId;
+  errorMessage.value = "";
+
+  try {
+    if (!targetConversation.isLocalOnly) {
+      await deleteConversation({
+        conversationId,
+        token: session.accessToken,
+      });
+    }
+
+    const nextConversations = conversations.value.filter((item) => item.id !== conversationId);
+    const deletedActiveConversation = activeConversationId.value === conversationId;
+
+    conversations.value = nextConversations;
+
+    if (!deletedActiveConversation) {
+      return;
+    }
+
+    const nextConversation = nextConversations[0] ?? null;
+    activeConversationId.value = nextConversation?.id ?? null;
+    draftMessage.value = "";
+    selectedTemporaryFile.value = null;
+
+    if (nextConversation && !nextConversation.isLocalOnly && !nextConversation.messagesLoaded) {
+      await loadMessagesForConversation(nextConversation.id);
+    }
+  } catch (error) {
+    errorMessage.value = resolveErrorMessage(error, "删除会话失败，请稍后重试");
+  } finally {
+    deletingConversationId.value = null;
+  }
+}
+
 function handleCreateConversation() {
-  if (isStreaming.value) {
+  if (isSubmittingConversation.value) {
     return;
   }
 
   activeConversationId.value = null;
   draftMessage.value = "";
   errorMessage.value = "";
+  selectedTemporaryFile.value = null;
+}
+
+async function handleTemporaryAnalysisSubmit(message) {
+  const temporaryFile = selectedTemporaryFile.value;
+
+  if (!temporaryFile || isAnalyzingTemporaryDocument.value) {
+    return;
+  }
+
+  errorMessage.value = "";
+
+  let conversation = null;
+
+  try {
+    conversation = await ensureConversationForTemporaryAnalysis(message, temporaryFile.name);
+  } catch (error) {
+    errorMessage.value = resolveErrorMessage(error, "创建临时分析会话失败，请稍后重试");
+    return;
+  }
+
+  draftMessage.value = "";
+
+  const now = new Date().toISOString();
+  const userMessage = {
+    id: createClientId(),
+    role: "user",
+    content: `【临时文档分析：${temporaryFile.name}】\n${message}`,
+    createdAt: now,
+    sections: [],
+  };
+  const assistantMessage = {
+    id: createClientId(),
+    role: "assistant",
+    content: "正在分析文档，请稍等...",
+    createdAt: now,
+    sections: [],
+  };
+
+  updateConversation({
+    ...conversation,
+    updatedAt: now,
+    messagesLoaded: true,
+    preview: message,
+    messages: [...conversation.messages, userMessage, assistantMessage],
+  });
+
+  isAnalyzingTemporaryDocument.value = true;
+
+  try {
+    const analysis = await analyzeTemporaryDocument({
+      file: temporaryFile,
+      instruction: message,
+      token: session.accessToken,
+    });
+    appendAssistantText(conversation.id, assistantMessage.id, analysis.result || "文档分析已完成，但没有返回可展示的结果。");
+    selectedTemporaryFile.value = null;
+  } catch (error) {
+    errorMessage.value = resolveErrorMessage(error, "临时文档分析失败，请稍后重试");
+    appendAssistantText(conversation.id, assistantMessage.id, errorMessage.value);
+  } finally {
+    isAnalyzingTemporaryDocument.value = false;
+  }
 }
 
 async function handleSubmit() {
@@ -315,7 +520,12 @@ async function handleSubmit() {
 
   const message = draftMessage.value.trim();
 
-  if (!message || isStreaming.value) {
+  if (!message || isSubmittingConversation.value) {
+    return;
+  }
+
+  if (selectedTemporaryFile.value) {
+    await handleTemporaryAnalysisSubmit(message);
     return;
   }
 
@@ -404,6 +614,7 @@ onMounted(async () => {
 
   try {
     await loadConversations();
+    await loadDocuments();
 
     if (activeConversationId.value) {
       await loadMessagesForConversation(activeConversationId.value);
@@ -450,12 +661,14 @@ onBeforeUnmount(() => {
 
       <div class="chat-workspace-layout">
         <aside class="chat-workspace-sidebar">
-          <ChatHistoryPanel
+          <ConversationHistoryPanel
             :conversations="conversations"
             :active-conversation-id="activeConversationId"
-            :is-streaming="isStreaming"
+            :deleting-conversation-id="deletingConversationId"
+            :is-streaming="isSubmittingConversation"
             :is-loading="isLoadingConversations"
             @create="handleCreateConversation"
+            @delete="handleDeleteConversation"
             @select="handleSelectConversation"
           />
         </aside>
@@ -464,9 +677,13 @@ onBeforeUnmount(() => {
           <ChatConversationPanel
             :conversation="activeConversation"
             :draft-message="draftMessage"
+            :is-submitting="isSubmittingConversation"
             :is-streaming="isStreaming"
             :error-message="errorMessage"
             :is-loading-conversation="isLoadingConversation"
+            :temporary-file-name="selectedTemporaryFileName"
+            @clear-temporary-file="clearTemporaryFile"
+            @select-temporary-file="handleTemporaryFileSelect"
             @submit="handleSubmit"
             @stop="stopStreaming"
             @update:draft-message="draftMessage = $event"
@@ -476,6 +693,9 @@ onBeforeUnmount(() => {
         <aside class="chat-workspace-knowledge">
           <KnowledgePanel
             :documents="documents"
+            :error-message="knowledgeErrorMessage"
+            :is-loading="isLoadingDocuments"
+            :is-uploading="isUploadingDocuments"
             @remove-document="handleRemoveDocument"
             @upload-files="handleUploadFiles"
           />

@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/auth",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/workspace",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/workspace/:path*",
+      "destination": "/index.html"
+    }
+  ]
+}

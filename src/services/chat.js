@@ -1,4 +1,12 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api";
+const TRACEBACK_MARKERS = [
+  "Traceback (most recent call last):",
+  "openai.APIConnectionError",
+  "httpx.ConnectError",
+  "httpcore.ConnectError",
+  "Connection error",
+  "File \"",
+];
 
 function buildHeaders(token, includeJson = true) {
   return {
@@ -15,13 +23,24 @@ function parseJsonSafely(value) {
   }
 }
 
+function looksLikeServerTraceback(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  const normalizedText = value.trim();
+
+  if (!normalizedText) {
+    return false;
+  }
+
+  return TRACEBACK_MARKERS.some((marker) => normalizedText.includes(marker));
+}
+
 async function parseErrorResponse(response) {
   const text = await response.text().catch(() => "");
   const data = text ? parseJsonSafely(text) : null;
-
-  if (typeof data?.detail === "string" && data.detail.trim()) {
-    return data.detail;
-  }
+  const detailMessage = typeof data?.detail === "string" ? data.detail.trim() : "";
 
   if (response.status === 401) {
     return "登录状态已失效，请重新登录";
@@ -35,11 +54,25 @@ async function parseErrorResponse(response) {
     return "目标会话不存在";
   }
 
-  if (text.trim()) {
-    return text;
+  if (detailMessage) {
+    if (response.status >= 500 || looksLikeServerTraceback(detailMessage)) {
+      return "智能对话服务暂时不可用，请稍后重试";
+    }
+
+    return detailMessage;
   }
 
-  return "智能对话暂时不可用，请稍后重试";
+  const normalizedText = text.trim();
+
+  if (!normalizedText) {
+    return "智能对话服务暂时不可用，请稍后重试";
+  }
+
+  if (response.status >= 500 || looksLikeServerTraceback(normalizedText)) {
+    return "智能对话服务暂时不可用，请稍后重试";
+  }
+
+  return normalizedText;
 }
 
 async function request(path, { method = "GET", token = "", body } = {}) {
@@ -337,6 +370,13 @@ export async function createConversation({ title, token }) {
 export async function getConversationMessages({ conversationId, token }) {
   const data = await request(`/chat/conversations/${conversationId}/messages`, { token });
   return Array.isArray(data) ? data.map(normalizeMessage) : [];
+}
+
+export async function deleteConversation({ conversationId, token }) {
+  await request(`/chat/conversations/${conversationId}`, {
+    method: "DELETE",
+    token,
+  });
 }
 
 export async function streamConversationReply({

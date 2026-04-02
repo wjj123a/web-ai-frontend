@@ -26,22 +26,6 @@ const props = defineProps({
 
 const emit = defineEmits(["select", "create", "delete"]);
 
-function getPreview(conversation) {
-  if (conversation.preview) {
-    return conversation.preview;
-  }
-
-  const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
-  const lastMessage = messages[messages.length - 1];
-
-  if (!lastMessage?.content) {
-    return conversation.messagesLoaded ? "等待第一条提问" : "点击查看历史消息";
-  }
-
-  const preview = String(lastMessage.content).replace(/\s+/g, " ").trim();
-  return preview.length > 24 ? `${preview.slice(0, 24)}…` : preview;
-}
-
 function formatConversationTime(value) {
   if (!value) {
     return "";
@@ -81,20 +65,34 @@ function formatConversationTime(value) {
     </div>
 
     <div v-if="props.conversations.length" class="chat-history-list">
-      <button
+      <article
         v-for="conversation in props.conversations"
         :key="conversation.id"
         class="chat-history-item"
         :class="{ 'is-active': conversation.id === props.activeConversationId }"
-        type="button"
-        :disabled="props.isStreaming && conversation.id !== props.activeConversationId"
-        @click="emit('select', conversation.id)"
       >
-        <div class="chat-history-item-top">
-          <strong>{{ conversation.title || "新对话" }}</strong>
-          <span>{{ formatConversationTime(conversation.updatedAt) }}</span>
-        </div>
-      </button>
+        <button
+          class="chat-history-item-select"
+          type="button"
+          :disabled="props.isStreaming && conversation.id !== props.activeConversationId"
+          @click="emit('select', conversation.id)"
+        >
+          <div class="chat-history-item-top">
+            <strong>{{ conversation.title || "新对话" }}</strong>
+            <span>{{ formatConversationTime(conversation.updatedAt) }}</span>
+          </div>
+        </button>
+
+        <button
+          class="chat-history-delete-button"
+          type="button"
+          :disabled="props.isStreaming || props.deletingConversationId === conversation.id"
+          :title="`删除 ${conversation.title || '会话'}`"
+          @click="emit('delete', conversation.id)"
+        >
+          x
+        </button>
+      </article>
     </div>
 
     <div v-else class="chat-history-empty">

@@ -6,6 +6,18 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  isLoading: {
+    type: Boolean,
+    default: false,
+  },
+  isUploading: {
+    type: Boolean,
+    default: false,
+  },
+  errorMessage: {
+    type: String,
+    default: "",
+  },
 });
 
 const emit = defineEmits(["upload-files", "remove-document"]);
@@ -60,7 +72,7 @@ function handleFileChange(event) {
   <section class="knowledge-panel">
     <div class="knowledge-panel-head">
       <div>
-        <h2>知识库</h2>
+        <h2>长期知识库</h2>
       </div>
     </div>
 
@@ -71,25 +83,35 @@ function handleFileChange(event) {
       </article>
       <article class="knowledge-stat-card">
         <span>最近更新</span>
-        <strong>{{ lastUpdatedText }}</strong>
+        <strong>{{ props.isLoading ? "加载中..." : lastUpdatedText }}</strong>
       </article>
     </div>
 
     <div class="knowledge-upload-card">
       <div>
-        <strong>上传文档</strong>
+        <strong>加入长期知识库</strong>
+        <p>当前仅支持 `txt` / `md`，上传后会进入长期知识库供后续对话检索。</p>
       </div>
-      <button class="chat-primary-button is-compact" type="button" @click="openFilePicker">
-        选择文件
+      <button
+        class="chat-primary-button is-compact"
+        type="button"
+        :disabled="props.isUploading"
+        @click="openFilePicker"
+      >
+        {{ props.isUploading ? "上传中..." : "选择文件" }}
       </button>
       <input
         ref="uploadInput"
         class="knowledge-upload-input"
         type="file"
         multiple
-        accept=".pdf,.doc,.docx,.md,.txt"
+        accept=".md,.txt,text/markdown,text/plain"
         @change="handleFileChange"
       />
+    </div>
+
+    <div v-if="props.errorMessage" class="chat-error-banner">
+      {{ props.errorMessage }}
     </div>
 
     <div class="knowledge-document-list">
@@ -101,6 +123,7 @@ function handleFileChange(event) {
         <button
           class="knowledge-remove-button"
           type="button"
+          :disabled="props.isUploading"
           @click="emit('remove-document', document.id)"
         >
           删除
